@@ -1,0 +1,15 @@
+bin/
+obj/
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln.docstates
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+.env
+data/measurements_*.txt
+data/sensor_*.log

@@ -1,0 +1,25 @@
+# Diretório para armazenamento de dados
+
+Este diretório é criado automaticamente durante a execução.
+
+## Ficheiros esperados (Fase 3 e posteriores):
+
+### measurements_*.txt
+Ficheiros de armazenamento de medições por tipo de dado:
+- measurements_TEMP.txt
+- measurements_HUM.txt
+- measurements_PM2.5.txt
+- measurements_RUIDO.txt
+- etc.
+
+Formato de cada linha:
+```
+timestamp:sensor_id:zona:tipo_dado:valor
+2026-03-10T09:15:00:S101:ZONA_CENTRO:PM2.5:78
+```
+
+### database.db (opcional - Fase 3)
+Base de dados relacional (se implementada com SQLite)
+
+## Limite de espaço
+Implementar política de retenção de dados em fases posteriores.
