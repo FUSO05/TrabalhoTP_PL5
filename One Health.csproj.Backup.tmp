@@ -10,6 +10,10 @@
 
   <ItemGroup>
     <None Include="OneHealth.sln" />
+    <None Include="src\Common\Common.csproj" />
+    <None Include="src\Gateway\Gateway.csproj" />
+    <None Include="src\Sensor\Sensor.csproj" />
+    <None Include="src\Server\Server.csproj" />
   </ItemGroup>
 
 </Project>
