@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+
 namespace One_Health.Common.Models;
 
 /// <summary>
