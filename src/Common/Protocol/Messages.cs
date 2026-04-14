@@ -1,7 +1,67 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace One_Health.Common.Protocol;
+
+/// <summary>
+/// Envelope temporário para desserialização polimórfica de mensagens
+/// Extrai o messageType sem desserializar o objeto completo
+/// </summary>
+internal class MessageEnvelope
+{
+    [JsonPropertyName("messageType")]
+    public string? MessageType { get; set; }
+}
+
+/// <summary>
+/// Factory para criar mensagens concretas a partir de JSON
+/// Resolve o problema de desserialização de tipos abstratos
+/// </summary>
+public static class MessageFactory
+{
+    public static Message? DeserializeMessage(string json)
+    {
+        try
+        {
+            // Primeiro, extrai apenas o messageType
+            var envelope = JsonSerializer.Deserialize<MessageEnvelope>(json, 
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (string.IsNullOrEmpty(envelope?.MessageType))
+                return null;
+
+            // Depois, desserializa para o tipo concreto apropriado
+            return envelope.MessageType switch
+            {
+                "CONNECT" => JsonSerializer.Deserialize<ConnectMessage>(json, 
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "REGISTER" => JsonSerializer.Deserialize<RegisterMessage>(json, 
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "DATA" => JsonSerializer.Deserialize<DataMessage>(json, 
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "HEARTBEAT" => JsonSerializer.Deserialize<HeartbeatMessage>(json, 
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "STREAM_REQUEST" => JsonSerializer.Deserialize<StreamRequestMessage>(json, 
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "DISCONNECT" => JsonSerializer.Deserialize<DisconnectMessage>(json, 
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "RESPONSE" => JsonSerializer.Deserialize<ResponseMessage>(json, 
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "STORE" => JsonSerializer.Deserialize<StoreMessage>(json, 
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "STORAGE_RESPONSE" => JsonSerializer.Deserialize<StorageResponseMessage>(json, 
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                _ => null
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}
 
 /// <summary>
 /// Classe base para mensagens do protocolo de comunicação SENSOR/GATEWAY/SERVIDOR

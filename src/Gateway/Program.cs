@@ -152,7 +152,7 @@ internal class GatewayProgram
     {
         try
         {
-            var baseMessage = MessageSerializer.Deserialize<Message>(json);
+            var baseMessage = MessageFactory.DeserializeMessage(json);
 
             if (baseMessage == null)
             {

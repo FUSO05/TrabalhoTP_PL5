@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Sockets;
 using System.Text;
@@ -336,6 +337,13 @@ internal class SensorProgram
             string? line = reader.ReadLine();
             if (line == null)
                 return null;
+
+            // For ResponseMessage, use MessageFactory
+            if (typeof(T) == typeof(ResponseMessage))
+            {
+                var msg = MessageFactory.DeserializeMessage(line);
+                return msg as T;
+            }
 
             return MessageSerializer.Deserialize<T>(line);
         }

@@ -103,8 +103,8 @@ internal class ServerProgram
     {
         try
         {
-            // Deserializar a mensagem
-            var baseMessage = MessageSerializer.Deserialize<Message>(json);
+            // Deserializar a mensagem usando o factory
+            var baseMessage = MessageFactory.DeserializeMessage(json);
 
             if (baseMessage == null)
             {
