@@ -45,6 +45,12 @@ public static class MessageFactory
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
                 "STREAM_REQUEST" => JsonSerializer.Deserialize<StreamRequestMessage>(json, 
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "STREAM_START" => JsonSerializer.Deserialize<StreamStartMessage>(json,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "STREAM_FRAME" => JsonSerializer.Deserialize<StreamFrameMessage>(json,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                "STREAM_END" => JsonSerializer.Deserialize<StreamEndMessage>(json,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
                 "DISCONNECT" => JsonSerializer.Deserialize<DisconnectMessage>(json, 
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
                 "RESPONSE" => JsonSerializer.Deserialize<ResponseMessage>(json, 
@@ -60,6 +66,55 @@ public static class MessageFactory
         {
             return null;
         }
+    }
+}
+
+/// <summary>
+/// Mensagem STREAM_START
+/// Sensor inicia o envio lógico de uma stream
+/// </summary>
+public class StreamStartMessage : Message
+{
+    public string SensorId { get; set; } = string.Empty;
+    public string StreamId { get; set; } = string.Empty;
+    public string StreamType { get; set; } = "VIDEO";
+
+    public StreamStartMessage()
+    {
+        MessageType = "STREAM_START";
+    }
+}
+
+/// <summary>
+/// Mensagem STREAM_FRAME
+/// Sensor envia um frame codificado em Base64
+/// </summary>
+public class StreamFrameMessage : Message
+{
+    public string SensorId { get; set; } = string.Empty;
+    public string StreamId { get; set; } = string.Empty;
+    public int Sequence { get; set; }
+    public string PayloadBase64 { get; set; } = string.Empty;
+
+    public StreamFrameMessage()
+    {
+        MessageType = "STREAM_FRAME";
+    }
+}
+
+/// <summary>
+/// Mensagem STREAM_END
+/// Sensor termina o envio lógico da stream
+/// </summary>
+public class StreamEndMessage : Message
+{
+    public string SensorId { get; set; } = string.Empty;
+    public string StreamId { get; set; } = string.Empty;
+    public string? Reason { get; set; }
+
+    public StreamEndMessage()
+    {
+        MessageType = "STREAM_END";
     }
 }
 
@@ -139,6 +194,9 @@ public class DataMessage : Message
 public class HeartbeatMessage : Message
 {
     public string SensorId { get; set; } = string.Empty;
+    public int IntervalSeconds { get; set; } = 120;
+    public bool IsStreaming { get; set; }
+    public bool IsLowBattery { get; set; }
 
     public HeartbeatMessage()
     {

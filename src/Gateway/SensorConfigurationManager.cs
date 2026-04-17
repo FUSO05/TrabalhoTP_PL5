@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 
 namespace One_Health.Gateway;
 
@@ -11,7 +12,7 @@ namespace One_Health.Gateway;
 public class SensorConfigurationManager
 {
     private readonly string filePath;
-    private readonly object lockObj = new();
+    private readonly Mutex fileMutex = new();
     private Dictionary<string, SensorConfiguration> sensors = new();
 
     public SensorConfigurationManager(string filePath)
@@ -22,7 +23,8 @@ public class SensorConfigurationManager
 
     private void LoadSensors()
     {
-        lock (lockObj)
+        fileMutex.WaitOne();
+        try
         {
             sensors.Clear();
 
@@ -42,45 +44,93 @@ public class SensorConfigurationManager
                     Console.WriteLine($"  ✓ Sensor carregado: {config.SensorId} ({config.Status}) - {config.Zone}");
                 }
             }
+
+            NormalizeAllLastSyncToLocalTime();
+        }
+        finally
+        {
+            fileMutex.ReleaseMutex();
         }
     }
 
     public SensorConfiguration? GetSensor(string sensorId)
     {
-        lock (lockObj)
+        fileMutex.WaitOne();
+        try
         {
             return sensors.TryGetValue(sensorId, out var config) ? config : null;
+        }
+        finally
+        {
+            fileMutex.ReleaseMutex();
+        }
+    }
+
+    private void NormalizeAllLastSyncToLocalTime()
+    {
+        bool changed = false;
+
+        foreach (var sensor in sensors.Values)
+        {
+            DateTime normalized = sensor.LastSync.Kind switch
+            {
+                DateTimeKind.Utc => sensor.LastSync.ToLocalTime(),
+                DateTimeKind.Local => sensor.LastSync,
+                _ => DateTime.SpecifyKind(sensor.LastSync, DateTimeKind.Local)
+            };
+
+            if (normalized != sensor.LastSync)
+            {
+                sensor.LastSync = normalized;
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            SaveSensors();
         }
     }
 
     public void UpdateLastSync(string sensorId)
     {
-        lock (lockObj)
+        fileMutex.WaitOne();
+        try
         {
             if (sensors.TryGetValue(sensorId, out var config))
             {
-                config.LastSync = DateTime.UtcNow;
+                config.LastSync = DateTime.Now;
                 SaveSensors();
             }
+        }
+        finally
+        {
+            fileMutex.ReleaseMutex();
         }
     }
 
     public void UpdateSensorStatus(string sensorId, string status)
     {
-        lock (lockObj)
+        fileMutex.WaitOne();
+        try
         {
             if (sensors.TryGetValue(sensorId, out var config))
             {
                 config.Status = status;
-                config.LastSync = DateTime.UtcNow;
+                config.LastSync = DateTime.Now;
                 SaveSensors();
             }
+        }
+        finally
+        {
+            fileMutex.ReleaseMutex();
         }
     }
 
     public bool IsSensorActive(string sensorId)
     {
-        lock (lockObj)
+        fileMutex.WaitOne();
+        try
         {
             if (sensors.TryGetValue(sensorId, out var config))
             {
@@ -88,11 +138,16 @@ public class SensorConfigurationManager
             }
             return false;
         }
+        finally
+        {
+            fileMutex.ReleaseMutex();
+        }
     }
 
     public bool IsSensorSupportingDataType(string sensorId, string dataType)
     {
-        lock (lockObj)
+        fileMutex.WaitOne();
+        try
         {
             if (sensors.TryGetValue(sensorId, out var config))
             {
@@ -100,17 +155,26 @@ public class SensorConfigurationManager
             }
             return false;
         }
+        finally
+        {
+            fileMutex.ReleaseMutex();
+        }
     }
 
     public string? GetSensorZone(string sensorId)
     {
-        lock (lockObj)
+        fileMutex.WaitOne();
+        try
         {
             if (sensors.TryGetValue(sensorId, out var config))
             {
                 return config.Zone;
             }
             return null;
+        }
+        finally
+        {
+            fileMutex.ReleaseMutex();
         }
     }
 
@@ -129,9 +193,14 @@ public class SensorConfigurationManager
 
     public Dictionary<string, SensorConfiguration> GetAllSensors()
     {
-        lock (lockObj)
+        fileMutex.WaitOne();
+        try
         {
             return new Dictionary<string, SensorConfiguration>(sensors);
+        }
+        finally
+        {
+            fileMutex.ReleaseMutex();
         }
     }
 }

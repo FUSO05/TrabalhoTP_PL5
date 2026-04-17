@@ -19,29 +19,46 @@ public class SensorConfiguration
         if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#"))
             return null;
 
-        var parts = line.Split(':');
+        if (line.StartsWith("sensor_id", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var parts = line.Split(':', 5);
         if (parts.Length < 5)
             return null;
+
+        string normalizedStatus = NormalizeStatus(parts[1].Trim());
+        string typesPart = parts[3].Trim().TrimStart('[').TrimEnd(']');
 
         var config = new SensorConfiguration
         {
             SensorId = parts[0].Trim(),
-            Status = parts[1].Trim(),
+            Status = normalizedStatus,
             Zone = parts[2].Trim(),
-            SupportedDataTypes = new List<string>(parts[3].Split(',', StringSplitOptions.TrimEntries)),
+            SupportedDataTypes = new List<string>(typesPart.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)),
         };
 
-        if (DateTime.TryParse(parts[4].Trim(), out var lastSync))
+        if (DateTimeOffset.TryParse(parts[4].Trim(), out var lastSync))
         {
-            config.LastSync = lastSync;
+            config.LastSync = lastSync.LocalDateTime;
         }
 
         return config;
     }
 
+    private static string NormalizeStatus(string status)
+    {
+        string normalized = status.Trim().ToLowerInvariant();
+
+        return normalized switch
+        {
+            "manutenção" => "manutencao",
+            _ => normalized
+        };
+    }
+
     public string ToCsvLine()
     {
-        return $"{SensorId}:{Status}:{Zone}:{string.Join(",", SupportedDataTypes)}:{LastSync:O}";
+        return $"{SensorId}:{Status}:{Zone}:{string.Join(",", SupportedDataTypes)}:{LastSync:yyyy-MM-ddTHH:mm:ss.fffffff}";
     }
 }
 
@@ -55,5 +72,6 @@ public class ConnectedSensor
     public System.Net.Sockets.TcpClient? Client { get; set; }
     public DateTime ConnectTime { get; set; } = DateTime.UtcNow;
     public DateTime LastHeartbeat { get; set; } = DateTime.UtcNow;
+    public int HeartbeatIntervalSeconds { get; set; } = 120;
     public bool IsRegistered { get; set; }
 }

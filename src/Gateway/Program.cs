@@ -16,13 +16,17 @@ namespace One_Health.Gateway;
 /// </summary>
 internal class GatewayProgram
 {
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
     private static TcpListener? listener;
     private static TcpClient? serverConnection;
     private static int serverPort = 8000;
     private static string serverIp = "127.0.0.1";
     private static SensorConfigurationManager? configManager;
     private static Dictionary<string, ConnectedSensor> connectedSensors = new();
-    private static readonly object sensorLock = new();
+    private static Dictionary<string, StreamSession> activeStreams = new();
+    private static readonly Mutex sensorMutex = new();
+    private static readonly Mutex serverWriteMutex = new();
+    private static readonly Mutex streamFileMutex = new();
 
     static void Main(string[] args)
     {
@@ -134,13 +138,18 @@ internal class GatewayProgram
             // Remover sensor conectado
             if (!string.IsNullOrEmpty(sensorId))
             {
-                lock (sensorLock)
+                sensorMutex.WaitOne();
+                try
                 {
                     if (connectedSensors.TryGetValue(sensorId, out var sensor))
                     {
                         connectedSensors.Remove(sensorId);
                         Console.WriteLine($"  × Sensor {sensorId} desconectado");
                     }
+                }
+                finally
+                {
+                    sensorMutex.ReleaseMutex();
                 }
             }
             client.Close();
@@ -180,6 +189,18 @@ internal class GatewayProgram
 
                 case "STREAM_REQUEST":
                     HandleStreamRequestMessage(json, writer, sensorId);
+                    break;
+
+                case "STREAM_START":
+                    HandleStreamStartMessage(json, writer, sensorId);
+                    break;
+
+                case "STREAM_FRAME":
+                    HandleStreamFrameMessage(json, writer, sensorId);
+                    break;
+
+                case "STREAM_END":
+                    HandleStreamEndMessage(json, writer, sensorId);
                     break;
 
                 case "DISCONNECT":
@@ -225,7 +246,8 @@ internal class GatewayProgram
         Console.WriteLine($"  ✓ Token gerado: {token}");
 
         // Adicionar sensor conectado
-        lock (sensorLock)
+        sensorMutex.WaitOne();
+        try
         {
             connectedSensors[sensorId] = new ConnectedSensor
             {
@@ -234,8 +256,13 @@ internal class GatewayProgram
                 Client = client,
                 ConnectTime = DateTime.UtcNow,
                 LastHeartbeat = DateTime.UtcNow,
+                HeartbeatIntervalSeconds = 120,
                 IsRegistered = false
             };
+        }
+        finally
+        {
+            sensorMutex.ReleaseMutex();
         }
 
         // Responder com OK (incluir token na mensagem)
@@ -274,8 +301,28 @@ internal class GatewayProgram
             return;
         }
 
+        // Verificar zona configurada
+        if (!string.Equals(msg.Zone, sensorConfig.Zone, StringComparison.OrdinalIgnoreCase))
+        {
+            SendResponse(writer, ResponseMessage.Error("REGISTER", "Zona inválida para este sensor"));
+            return;
+        }
+
+        // Verificar tipos de dados suportados
+        var configuredTypes = sensorConfig.SupportedDataTypes;
+        bool registerTypesValid = msg.SupportedDataTypes != null
+            && msg.SupportedDataTypes.Count > 0
+            && msg.SupportedDataTypes.All(type => configuredTypes.Contains(type, StringComparer.OrdinalIgnoreCase));
+
+        if (!registerTypesValid)
+        {
+            SendResponse(writer, ResponseMessage.Error("REGISTER", "Tipos de dados inválidos para este sensor"));
+            return;
+        }
+
         // Verificar token
-        lock (sensorLock)
+        sensorMutex.WaitOne();
+        try
         {
             if (!connectedSensors.TryGetValue(sensorId, out var sensor) || sensor.Token != msg.Token)
             {
@@ -288,6 +335,10 @@ internal class GatewayProgram
             {
                 sensor.IsRegistered = true;
             }
+        }
+        finally
+        {
+            sensorMutex.ReleaseMutex();
         }
 
         // Atualizar last_sync
@@ -309,13 +360,18 @@ internal class GatewayProgram
         Console.WriteLine($"  📊 DATA: {sensorId} - {msg.DataType}={msg.Value}");
 
         // Validar sensor registado
-        lock (sensorLock)
+        sensorMutex.WaitOne();
+        try
         {
             if (!connectedSensors.TryGetValue(sensorId, out var sensor) || !sensor.IsRegistered)
             {
                 SendResponse(writer, ResponseMessage.Error("DATA", "Sensor não está registado"));
                 return;
             }
+        }
+        finally
+        {
+            sensorMutex.ReleaseMutex();
         }
 
         // Validar tipo de dado suportado
@@ -327,11 +383,17 @@ internal class GatewayProgram
         }
 
         // Encaminhar para servidor
-        ForwardToServer(sensorId, msg);
+        bool forwarded = ForwardToServer(sensorId, msg);
+        if (!forwarded)
+        {
+            SendResponse(writer, ResponseMessage.Error("DATA", "Falha ao encaminhar dados para o servidor"));
+            return;
+        }
 
         // Atualizar last_sync
         configManager?.UpdateLastSync(sensorId);
         Console.WriteLine($"  ✓ Dados encaminhados para servidor");
+        SendResponse(writer, ResponseMessage.Ok("DATA", "Dados recebidos e encaminhados com sucesso"));
     }
 
     private static void HandleHeartbeatMessage(string json, StreamWriter writer, string sensorId)
@@ -346,12 +408,18 @@ internal class GatewayProgram
         Console.WriteLine($"  💓 HEARTBEAT: {sensorId}");
 
         // Atualizar last sync
-        lock (sensorLock)
+        sensorMutex.WaitOne();
+        try
         {
             if (connectedSensors.TryGetValue(sensorId, out var sensor))
             {
                 sensor.LastHeartbeat = DateTime.UtcNow;
+                sensor.HeartbeatIntervalSeconds = GetEffectiveHeartbeatIntervalSeconds(msg);
             }
+        }
+        finally
+        {
+            sensorMutex.ReleaseMutex();
         }
 
         configManager?.UpdateLastSync(sensorId);
@@ -366,8 +434,141 @@ internal class GatewayProgram
             return;
         }
 
+        if (!IsSensorRegistered(sensorId))
+        {
+            SendResponse(writer, ResponseMessage.Error("STREAM_REQUEST", "Sensor não está registado"));
+            return;
+        }
+
         Console.WriteLine($"  📹 STREAM_REQUEST: {sensorId} - {msg.StreamType}");
         SendResponse(writer, ResponseMessage.Ok("STREAM_REQUEST", "Stream request recebido"));
+    }
+
+    private static void HandleStreamStartMessage(string json, StreamWriter writer, string sensorId)
+    {
+        var msg = MessageSerializer.Deserialize<StreamStartMessage>(json);
+        if (msg == null || string.IsNullOrWhiteSpace(msg.StreamId))
+        {
+            SendResponse(writer, ResponseMessage.Error("STREAM_START", "Mensagem STREAM_START inválida"));
+            return;
+        }
+
+        if (!IsSensorRegistered(sensorId))
+        {
+            SendResponse(writer, ResponseMessage.Error("STREAM_START", "Sensor não está registado"));
+            return;
+        }
+
+        sensorMutex.WaitOne();
+        try
+        {
+            activeStreams[msg.StreamId] = new StreamSession
+            {
+                StreamId = msg.StreamId,
+                SensorId = sensorId,
+                StreamType = msg.StreamType,
+                StartTime = DateTime.Now,
+                LastFrameTime = DateTime.Now,
+                FrameCount = 0
+            };
+        }
+        finally
+        {
+            sensorMutex.ReleaseMutex();
+        }
+
+        Console.WriteLine($"  ▶️ STREAM_START: Sensor={sensorId}, StreamId={msg.StreamId}, Tipo={msg.StreamType}");
+        SendResponse(writer, ResponseMessage.Ok("STREAM_START", "Stream iniciada"));
+    }
+
+    private static void HandleStreamFrameMessage(string json, StreamWriter writer, string sensorId)
+    {
+        var msg = MessageSerializer.Deserialize<StreamFrameMessage>(json);
+        if (msg == null || string.IsNullOrWhiteSpace(msg.StreamId))
+        {
+            SendResponse(writer, ResponseMessage.Error("STREAM_FRAME", "Mensagem STREAM_FRAME inválida"));
+            return;
+        }
+
+        if (!IsSensorRegistered(sensorId))
+        {
+            SendResponse(writer, ResponseMessage.Error("STREAM_FRAME", "Sensor não está registado"));
+            return;
+        }
+
+        sensorMutex.WaitOne();
+        try
+        {
+            if (!activeStreams.TryGetValue(msg.StreamId, out var session) || session.SensorId != sensorId)
+            {
+                SendResponse(writer, ResponseMessage.Error("STREAM_FRAME", "Stream não iniciada"));
+                return;
+            }
+
+            session.FrameCount++;
+            session.LastFrameTime = DateTime.Now;
+            session.LastSequence = msg.Sequence;
+        }
+        finally
+        {
+            sensorMutex.ReleaseMutex();
+        }
+
+        string streamsDir = Path.Combine("data", "streams");
+        streamFileMutex.WaitOne();
+        try
+        {
+            Directory.CreateDirectory(streamsDir);
+            string streamLogFile = Path.Combine(streamsDir, $"stream_{msg.StreamId}.log");
+            string logLine = $"{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffffff}:{sensorId}:{msg.StreamId}:{msg.Sequence}:{msg.PayloadBase64.Length}";
+            File.AppendAllText(streamLogFile, logLine + Environment.NewLine);
+        }
+        finally
+        {
+            streamFileMutex.ReleaseMutex();
+        }
+
+        SendResponse(writer, ResponseMessage.Ok("STREAM_FRAME", "Frame recebido"));
+    }
+
+    private static void HandleStreamEndMessage(string json, StreamWriter writer, string sensorId)
+    {
+        var msg = MessageSerializer.Deserialize<StreamEndMessage>(json);
+        if (msg == null || string.IsNullOrWhiteSpace(msg.StreamId))
+        {
+            SendResponse(writer, ResponseMessage.Error("STREAM_END", "Mensagem STREAM_END inválida"));
+            return;
+        }
+
+        if (!IsSensorRegistered(sensorId))
+        {
+            SendResponse(writer, ResponseMessage.Error("STREAM_END", "Sensor não está registado"));
+            return;
+        }
+
+        StreamSession? session = null;
+        sensorMutex.WaitOne();
+        try
+        {
+            if (activeStreams.TryGetValue(msg.StreamId, out var existing) && existing.SensorId == sensorId)
+            {
+                session = existing;
+                activeStreams.Remove(msg.StreamId);
+            }
+        }
+        finally
+        {
+            sensorMutex.ReleaseMutex();
+        }
+
+        if (session == null)
+        {
+            SendResponse(writer, ResponseMessage.Error("STREAM_END", "Stream não encontrada"));
+            return;
+        }
+
+        Console.WriteLine($"  ⏹️ STREAM_END: Sensor={sensorId}, StreamId={msg.StreamId}, Frames={session.FrameCount}");
+        SendResponse(writer, ResponseMessage.Ok("STREAM_END", $"Stream finalizada com {session.FrameCount} frames"));
     }
 
     private static void HandleDisconnectMessage(string json, StreamWriter writer, string sensorId)
@@ -381,22 +582,51 @@ internal class GatewayProgram
 
         Console.WriteLine($"  🔌 DISCONNECT: {sensorId}");
 
-        lock (sensorLock)
+        sensorMutex.WaitOne();
+        try
         {
             connectedSensors.Remove(sensorId);
+        }
+        finally
+        {
+            sensorMutex.ReleaseMutex();
         }
 
         SendResponse(writer, ResponseMessage.Ok("DISCONNECT", "Desconexão confirmada"));
     }
 
-    private static void ForwardToServer(string sensorId, DataMessage data)
+internal class StreamSession
+{
+    public string StreamId { get; set; } = string.Empty;
+    public string SensorId { get; set; } = string.Empty;
+    public string StreamType { get; set; } = "VIDEO";
+    public DateTime StartTime { get; set; }
+    public DateTime LastFrameTime { get; set; }
+    public int FrameCount { get; set; }
+    public int LastSequence { get; set; }
+}
+
+    private static bool IsSensorRegistered(string sensorId)
+    {
+        sensorMutex.WaitOne();
+        try
+        {
+            return connectedSensors.TryGetValue(sensorId, out var sensor) && sensor.IsRegistered;
+        }
+        finally
+        {
+            sensorMutex.ReleaseMutex();
+        }
+    }
+
+    private static bool ForwardToServer(string sensorId, DataMessage data)
     {
         try
         {
             if (serverConnection == null || !serverConnection.Connected)
             {
-                Console.WriteLine($"  ❌ Conexão com servidor perdida");
-                return;
+                Console.WriteLine("  ❌ Conexão com servidor perdida");
+                return false;
             }
 
             var zone = configManager?.GetSensorZone(sensorId);
@@ -411,15 +641,49 @@ internal class GatewayProgram
 
             string json = MessageSerializer.Serialize(storeMsg);
 
-            using (NetworkStream stream = serverConnection.GetStream())
-            using (StreamWriter writer = new(stream, Encoding.UTF8) { AutoFlush = true })
+            serverWriteMutex.WaitOne();
+            try
             {
+                NetworkStream stream = serverConnection.GetStream();
+
+                // leaveOpen = true para NÃO fechar a conexão TCP com o servidor
+                using StreamWriter writer = new(stream, Utf8NoBom, 1024, leaveOpen: true)
+                {
+                    AutoFlush = true
+                };
+
                 writer.WriteLine(json);
+
+                using StreamReader reader = new(stream, Utf8NoBom, false, 1024, leaveOpen: true);
+                string? responseLine = reader.ReadLine();
+
+                if (string.IsNullOrWhiteSpace(responseLine))
+                {
+                    Console.WriteLine("  ⚠️  Sem resposta de armazenamento do servidor");
+                    return false;
+                }
+
+                responseLine = responseLine.TrimStart('\uFEFF');
+
+                var storageResponse = MessageFactory.DeserializeMessage(responseLine) as StorageResponseMessage;
+                storageResponse ??= MessageSerializer.Deserialize<StorageResponseMessage>(responseLine);
+                if (storageResponse == null || storageResponse.Status != "STORED")
+                {
+                    Console.WriteLine($"  ❌ Servidor rejeitou armazenamento: {storageResponse?.Message ?? "resposta inválida"}");
+                    return false;
+                }
             }
+            finally
+            {
+                serverWriteMutex.ReleaseMutex();
+            }
+
+            return true;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"  ❌ Erro ao encaminhar para servidor: {ex.Message}");
+            return false;
         }
     }
 
@@ -439,17 +703,20 @@ internal class GatewayProgram
 
     private static void MonitorHeartbeatTimeout()
     {
-        const int heartbeatTimeoutSeconds = 30;
-
         while (true)
         {
             Thread.Sleep(10000); // Verificar a cada 10 segundos
 
-            lock (sensorLock)
+            sensorMutex.WaitOne();
+            try
             {
                 var now = DateTime.UtcNow;
                 var timedOutSensors = connectedSensors
-                    .Where(kvp => (now - kvp.Value.LastHeartbeat).TotalSeconds > heartbeatTimeoutSeconds)
+                    .Where(kvp =>
+                    {
+                        int timeoutSeconds = kvp.Value.HeartbeatIntervalSeconds * 3;
+                        return (now - kvp.Value.LastHeartbeat).TotalSeconds > timeoutSeconds;
+                    })
                     .ToList();
 
                 foreach (var kvp in timedOutSensors)
@@ -459,6 +726,30 @@ internal class GatewayProgram
                     connectedSensors.Remove(kvp.Key);
                 }
             }
+            finally
+            {
+                sensorMutex.ReleaseMutex();
+            }
         }
+    }
+
+    private static int GetEffectiveHeartbeatIntervalSeconds(HeartbeatMessage msg)
+    {
+        if (msg.IsLowBattery)
+        {
+            return 300;
+        }
+
+        if (msg.IsStreaming)
+        {
+            return 20;
+        }
+
+        if (msg.IntervalSeconds <= 0)
+        {
+            return 120;
+        }
+
+        return msg.IntervalSeconds;
     }
 }

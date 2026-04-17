@@ -16,7 +16,7 @@ internal class ServerProgram
 {
     private static TcpListener? listener;
     private static string dataDirectory = "./data";
-    private static readonly object fileLock = new();
+    private static readonly Mutex fileMutex = new();
 
     static void Main(string[] args)
     {
@@ -196,14 +196,25 @@ internal class ServerProgram
     {
         try
         {
-            string fileName = Path.Combine(dataDirectory, $"measurements_{message.DataType}.txt");
+            string sensorDirectory = Path.Combine(dataDirectory, message.SensorId);
+            if (!Directory.Exists(sensorDirectory))
+            {
+                Directory.CreateDirectory(sensorDirectory);
+            }
+
+            string fileName = Path.Combine(sensorDirectory, $"measurements_{message.DataType}.txt");
 
             // Formato: timestamp:sensor_id:zona:tipo_dado:valor
             string line = $"{message.Timestamp:O}:{message.SensorId}:{message.Zone}:{message.DataType}:{message.Value}";
 
-            lock (fileLock)
+            fileMutex.WaitOne();
+            try
             {
                 File.AppendAllText(fileName, line + Environment.NewLine);
+            }
+            finally
+            {
+                fileMutex.ReleaseMutex();
             }
 
             return true;
