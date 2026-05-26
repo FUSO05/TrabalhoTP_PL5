@@ -1,0 +1,156 @@
+@page
+@model MeasurementsModel
+@{ ViewData["Title"] = "Medições"; }
+
+<h1>Medições</h1>
+<p class="page-subtitle">Consulte e filtre todas as medições armazenadas</p>
+
+<div class="filter-form">
+    <input type="hidden" name="page" value="1" id="pageReset" form="filterForm" />
+    <form id="filterForm" method="get" style="display:contents">
+        <input type="hidden" name="page" value="1" />
+        <div class="form-group">
+            <label>Sensor</label>
+            <select id="ddSensor" name="sensorId" onchange="onSensorChange()">
+                <option value="">— Todos —</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Zona</label>
+            <select id="ddZone" name="zone">
+                <option value="">— Todas —</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Tipo de dado</label>
+            <select id="ddType" name="dataType">
+                <option value="">— Todos —</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>De</label>
+            <input type="datetime-local" name="from" value="@Model.FilterFrom" />
+        </div>
+        <div class="form-group">
+            <label>Até</label>
+            <input type="datetime-local" name="to" value="@Model.FilterTo" />
+        </div>
+        <button type="submit" class="btn">🔍 Filtrar</button>
+    </form>
+</div>
+
+@if (Model.TotalCount == 0)
+{
+    <div class="card empty">Nenhuma medição encontrada com estes filtros.</div>
+}
+else
+{
+    <div class="section-header">
+        <p class="page-info" style="margin:0">
+            <strong>@Model.TotalCount</strong> resultado(s) &nbsp;·&nbsp;
+            Página <strong>@Model.CurrentPage</strong> de <strong>@Model.TotalPages</strong>
+        </p>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Timestamp</th>
+                    <th>Sensor</th>
+                    <th>Zona</th>
+                    <th>Tipo</th>
+                    <th>Valor</th>
+                    <th>Armazenado em</th>
+                </tr>
+            </thead>
+            <tbody>
+            @foreach (var m in Model.Results)
+            {
+                <tr>
+                    <td style="color:var(--text-muted);font-size:.8rem">@m.Id</td>
+                    <td style="color:var(--text-muted);font-size:.82rem;white-space:nowrap">@m.Timestamp</td>
+                    <td><strong>@m.SensorId</strong></td>
+                    <td><span class="badge badge-zone">@m.Zone</span></td>
+                    <td><span class="badge badge-type">@m.DataType</span></td>
+                    <td><strong>@m.Value.ToString("F2")</strong></td>
+                    <td style="color:var(--text-muted);font-size:.8rem;white-space:nowrap">@m.StoredAt</td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+
+    @if (Model.TotalPages > 1)
+    {
+        <div class="pagination">
+            @if (Model.CurrentPage > 1)
+            {
+                <a href="@Model.PageUrl(Model.CurrentPage - 1)">&#8592; Anterior</a>
+            }
+            else
+            {
+                <span class="disabled">&#8592;</span>
+            }
+
+            @{
+                int start = Math.Max(1, Model.CurrentPage - 2);
+                int end   = Math.Min(Model.TotalPages, Model.CurrentPage + 2);
+            }
+            @if (start > 1) { <a href="@Model.PageUrl(1)">1</a> }
+            @if (start > 2) { <span style="border:none;background:none;color:var(--text-muted)">…</span> }
+
+            @for (int p = start; p <= end; p++)
+            {
+                if (p == Model.CurrentPage) { <span class="active">@p</span> }
+                else { <a href="@Model.PageUrl(p)">@p</a> }
+            }
+
+            @if (end < Model.TotalPages - 1) { <span style="border:none;background:none;color:var(--text-muted)">…</span> }
+            @if (end < Model.TotalPages) { <a href="@Model.PageUrl(Model.TotalPages)">@Model.TotalPages</a> }
+
+            @if (Model.CurrentPage < Model.TotalPages)
+            {
+                <a href="@Model.PageUrl(Model.CurrentPage + 1)">Próxima &#8594;</a>
+            }
+            else
+            {
+                <span class="disabled">&#8594;</span>
+            }
+        </div>
+    }
+}
+
+<script>
+const SENSORS = @Html.Raw(Model.SensorConfigJson);
+const SEL_SENSOR = @Json.Serialize(Model.FilterSensorId ?? "");
+const SEL_ZONE   = @Json.Serialize(Model.FilterZone ?? "");
+const SEL_TYPE   = @Json.Serialize(Model.FilterDataType ?? "");
+
+function allZones() { return [...new Set(SENSORS.map(s => s.zone))].sort(); }
+function allTypes() { return [...new Set(SENSORS.flatMap(s => s.dataTypes))].sort(); }
+
+function populate(el, values, selected, allLabel) {
+    el.innerHTML = `<option value="">${allLabel}</option>`;
+    values.forEach(v => {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = v;
+        if (v === selected) o.selected = true;
+        el.appendChild(o);
+    });
+}
+
+function onSensorChange() {
+    const sid = document.getElementById('ddSensor').value;
+    const s   = SENSORS.find(s => s.sensorId === sid);
+    populate(document.getElementById('ddZone'), s ? [s.zone] : allZones(), SEL_ZONE, '— Todas —');
+    populate(document.getElementById('ddType'), s ? s.dataTypes : allTypes(), SEL_TYPE, '— Todos —');
+}
+
+populate(document.getElementById('ddSensor'), SENSORS.map(s => s.sensorId), SEL_SENSOR, '— Todos —');
+document.getElementById('ddSensor').value = SEL_SENSOR;
+onSensorChange();
+document.getElementById('ddZone').value = SEL_ZONE;
+document.getElementById('ddType').value = SEL_TYPE;
+</script>

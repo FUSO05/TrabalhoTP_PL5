@@ -1,0 +1,67 @@
+@page
+@model IndexModel
+@{ ViewData["Title"] = "Dashboard"; }
+
+<h1>Dashboard</h1>
+<p class="page-subtitle">Monitorização ambiental urbana — Distrito de Vila Real</p>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-icon">📊</div>
+        <div class="stat-label">Medições Totais</div>
+        <div class="stat-value">@Model.TotalMeasurements</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">📡</div>
+        <div class="stat-label">Sensores Ativos</div>
+        <div class="stat-value">@Model.SensorCount</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">🗺️</div>
+        <div class="stat-label">Zonas Monitorizadas</div>
+        <div class="stat-value">@Model.ZoneCount</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon">🔬</div>
+        <div class="stat-label">Análises Realizadas</div>
+        <div class="stat-value">@Model.AnalysisCount</div>
+    </div>
+</div>
+
+<div class="section-header">
+    <h2 style="margin:0">Medições Recentes</h2>
+    <a class="btn btn-outline" asp-page="/Measurements">Ver todas →</a>
+</div>
+
+@if (Model.Recent.Count == 0)
+{
+    <div class="card empty">Sem medições ainda. Inicie um Sensor para começar.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Sensor</th>
+                    <th>Zona</th>
+                    <th>Tipo</th>
+                    <th>Valor</th>
+                </tr>
+            </thead>
+            <tbody>
+            @foreach (var m in Model.Recent)
+            {
+                <tr>
+                    <td style="color:var(--text-muted);font-size:.82rem">@m.Timestamp</td>
+                    <td><strong>@m.SensorId</strong></td>
+                    <td><span class="badge badge-zone">@m.Zone</span></td>
+                    <td><span class="badge badge-type">@m.DataType</span></td>
+                    <td><strong>@m.Value.ToString("F2")</strong></td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+}

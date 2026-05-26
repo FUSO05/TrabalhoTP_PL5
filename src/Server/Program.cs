@@ -1,234 +1,110 @@
-using System;
-using System.IO;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
-using System.Threading;
-using One_Health.Common.Protocol;
-using One_Health.Common.Utilities;
+using Analysis;
+using Grpc.Net.Client;
+using One_Health.Server.Services;
 
-namespace One_Health.Server;
+var builder = WebApplication.CreateBuilder(args);
 
-/// <summary>
-/// SERVIDOR: Recebe dados validados do GATEWAY e armazena em ficheiros
-/// </summary>
-internal class ServerProgram
+// ── Configuration ──────────────────────────────────────────────────────────
+builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
 {
-    private static TcpListener? listener;
-    private static string dataDirectory = "./data";
-    private static readonly Mutex fileMutex = new();
+    ["Database:Path"]        = "data/onehealth.db",
+    ["TcpPort"]              = "8000",
+    ["AnalysisService:Url"]  = "http://localhost:50052",
+});
 
-    static void Main(string[] args)
+// ── Services ───────────────────────────────────────────────────────────────
+builder.Services.AddRazorPages();
+builder.Services.AddSingleton<DatabaseService>();
+builder.Services.AddHostedService<GatewayListenerService>();
+
+// HTTP port for dashboard
+builder.WebHost.ConfigureKestrel(k => k.ListenAnyIP(8080));
+
+var app = builder.Build();
+
+// ── Pipeline ───────────────────────────────────────────────────────────────
+app.UseStaticFiles();
+app.UseRouting();
+app.MapRazorPages();
+
+// ── REST API ───────────────────────────────────────────────────────────────
+var api = app.MapGroup("/api");
+
+// GET /api/measurements
+api.MapGet("/measurements", (DatabaseService db,
+    string? sensorId, string? zone, string? dataType,
+    string? from, string? to, int limit = 100) =>
+{
+    DateTime? fromDt = from  != null ? DateTime.Parse(from) : null;
+    DateTime? toDt   = to    != null ? DateTime.Parse(to)   : null;
+    var data = db.QueryMeasurements(sensorId, zone, dataType, fromDt, toDt, limit);
+    return Results.Ok(data);
+});
+
+// GET /api/analysis
+api.MapGet("/analysis", (DatabaseService db) =>
+    Results.Ok(db.GetAnalysisResults()));
+
+// POST /api/analysis  — triggers AnalysisService gRPC call
+api.MapPost("/analysis", async (DatabaseService db, IConfiguration config, AnalysisRequest req) =>
+{
+    string analysisUrl = config["AnalysisService:Url"] ?? "http://localhost:50052";
+
+    // Load data points from DB
+    DateTime? fromDt = string.IsNullOrWhiteSpace(req.StartTime) ? null : DateTime.Parse(req.StartTime);
+    DateTime? toDt   = string.IsNullOrWhiteSpace(req.EndTime)   ? null : DateTime.Parse(req.EndTime);
+    var values = db.GetValuesForAnalysis(req.DataType, req.SensorId, fromDt, toDt);
+
+    if (values.Count == 0)
+        return Results.BadRequest(new { error = "Sem dados para o período/tipo solicitado." });
+
+    // Call Python gRPC Analysis service
+    using var channel = GrpcChannel.ForAddress(analysisUrl);
+    var client        = new AnalysisService.AnalysisServiceClient(channel);
+
+    var grpcRequest = new global::Analysis.AnalysisRequest
     {
-        Console.WriteLine("╔════════════════════════════════════════════════════════════╗");
-        Console.WriteLine("║   ONE HEALTH SERVER                                        ║");
-        Console.WriteLine("║   Armazenamento de Dados                                   ║");
-        Console.WriteLine("╚════════════════════════════════════════════════════════════╝");
-        Console.WriteLine();
+        SensorId     = req.SensorId ?? "",
+        Zone         = req.Zone ?? "",
+        DataType     = req.DataType,
+        StartTime    = req.StartTime ?? "",
+        EndTime      = req.EndTime ?? "",
+        AnalysisType = req.AnalysisType ?? "STATISTICS",
+    };
+    grpcRequest.DataPoints.AddRange(values.Select((v, i) => new DataPoint { Value = v, Timestamp = "" }));
 
-        int port = args.Length > 0 ? int.Parse(args[0]) : 8000;
-        dataDirectory = args.Length > 1 ? args[1] : "./data";
+    global::Analysis.AnalysisResult result;
+    try { result = await client.AnalyzeAsync(grpcRequest); }
+    catch (Exception ex) { return Results.Problem($"AnalysisService indisponível: {ex.Message}"); }
 
-        Console.WriteLine($"📡 Porta de escuta: {port}");
-        Console.WriteLine($"📁 Diretório de dados: {dataDirectory}");
-        Console.WriteLine();
+    // Persist result
+    var record = new AnalysisRecord(0,
+        result.AnalysisType, req.SensorId, req.Zone, req.DataType,
+        result.Mean, result.StdDev, result.MinValue, result.MaxValue,
+        result.RiskLevel, result.Summary,
+        string.Join("|", result.Patterns),
+        DateTime.UtcNow.ToString("O"));
+    db.StoreAnalysisResult(record);
 
-        // Criar diretório se não existir
-        if (!Directory.Exists(dataDirectory))
-        {
-            Directory.CreateDirectory(dataDirectory);
-            Console.WriteLine($"✓ Diretório criado: {dataDirectory}");
-        }
+    return Results.Ok(record with { Id = 0 });
+});
 
-        try
-        {
-            listener = new TcpListener(IPAddress.Any, port);
-            listener.Start();
-            Console.WriteLine($"✓ Servidor iniciado na porta {port}");
-            Console.WriteLine("⏳ Aguardando conexões do GATEWAY...\n");
+// GET /api/sensors
+api.MapGet("/sensors", (DatabaseService db) =>
+    Results.Ok(db.GetDistinctSensors()));
 
-            // Loop de aceitação de conexões
-            while (true)
-            {
-                TcpClient client = listener.AcceptTcpClient();
-                Console.WriteLine($"→ Conexão recebida de {client.Client.RemoteEndPoint}");
+// GET /api/datatypes
+api.MapGet("/datatypes", (DatabaseService db) =>
+    Results.Ok(db.GetDistinctDataTypes()));
 
-                // Processar cliente em thread separada
-                Thread clientThread = new(() => HandleClient(client))
-                {
-                    IsBackground = true
-                };
-                clientThread.Start();
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"❌ Erro: {ex.Message}");
-        }
-        finally
-        {
-            listener?.Stop();
-        }
-    }
+Console.WriteLine("╔════════════════════════════════════════════════════════════╗");
+Console.WriteLine("║   ONE HEALTH SERVER (TP2)                                  ║");
+Console.WriteLine("║   TCP :8000 (Gateway)  |  HTTP :8080 (Dashboard)           ║");
+Console.WriteLine("╚════════════════════════════════════════════════════════════╝");
 
-    private static void HandleClient(TcpClient client)
-    {
-        try
-        {
-            using (NetworkStream stream = client.GetStream())
-            using (StreamReader reader = new(stream, Encoding.UTF8))
-            using (StreamWriter writer = new(stream, Encoding.UTF8) { AutoFlush = true })
-            {
-                string? line;
-                while ((line = reader.ReadLine()) != null && line.Length > 0)
-                {
-                    Console.WriteLine($"  📨 Mensagem recebida: {line.Substring(0, Math.Min(100, line.Length))}...");
+app.Run();
 
-                    ProcessMessage(line, writer);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  ❌ Erro ao processar cliente: {ex.Message}");
-        }
-        finally
-        {
-            client.Close();
-            Console.WriteLine($"← Conexão fechada\n");
-        }
-    }
-
-    private static void ProcessMessage(string json, StreamWriter writer)
-    {
-        try
-        {
-            // Deserializar a mensagem usando o factory
-            var baseMessage = MessageFactory.DeserializeMessage(json);
-
-            if (baseMessage == null)
-            {
-                SendResponse(writer, StorageResponseMessage.Error("Mensagem inválida"));
-                return;
-            }
-
-            // Processar diferentes tipos de mensagem
-            switch (baseMessage.MessageType)
-            {
-                case "STORE":
-                    HandleStoreMessage(json, writer);
-                    break;
-
-                default:
-                    Console.WriteLine($"  ⚠️  Tipo de mensagem não suportado: {baseMessage.MessageType}");
-                    SendResponse(writer, StorageResponseMessage.Error($"Tipo de mensagem não suportado: {baseMessage.MessageType}"));
-                    break;
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  ❌ Erro ao processar mensagem: {ex.Message}");
-            SendResponse(writer, StorageResponseMessage.Error($"Erro ao processar mensagem: {ex.Message}"));
-        }
-    }
-
-    private static void HandleStoreMessage(string json, StreamWriter writer)
-    {
-        var storeMessage = MessageSerializer.Deserialize<StoreMessage>(json);
-
-        if (storeMessage == null)
-        {
-            SendResponse(writer, StorageResponseMessage.Error("Mensagem STORE inválida"));
-            return;
-        }
-
-        Console.WriteLine($"  📦 STORE: Sensor={storeMessage.SensorId}, Tipo={storeMessage.DataType}, Valor={storeMessage.Value}");
-
-        // Validação de dados
-        if (string.IsNullOrEmpty(storeMessage.SensorId))
-        {
-            SendResponse(writer, StorageResponseMessage.Error("SensorId não pode estar vazio"));
-            return;
-        }
-
-        if (string.IsNullOrEmpty(storeMessage.DataType))
-        {
-            SendResponse(writer, StorageResponseMessage.Error("DataType não pode estar vazio"));
-            return;
-        }
-
-        // Validar limites de valores (apenas para tipos conhecidos)
-        if (!ValidateDataValue(storeMessage.DataType, storeMessage.Value))
-        {
-            SendResponse(writer, StorageResponseMessage.Error($"Valor fora dos limites para tipo {storeMessage.DataType}"));
-            return;
-        }
-
-        // Armazenar em ficheiro
-        if (StoreDataToFile(storeMessage))
-        {
-            Console.WriteLine($"  ✓ Dados armazenados com sucesso");
-            SendResponse(writer, StorageResponseMessage.Stored("Dados armazenados com sucesso"));
-        }
-        else
-        {
-            SendResponse(writer, StorageResponseMessage.Error("Erro ao escrever ficheiro de dados"));
-        }
-    }
-
-    private static bool ValidateDataValue(string dataType, double value)
-    {
-        // Validação simples de limites para tipos conhecidos
-        return dataType switch
-        {
-            "TEMP" => value >= -50 && value <= 60,           // Temperatura: -50°C a 60°C
-            "HUM" => value >= 0 && value <= 100,             // Humidade: 0% a 100%
-            "PM2.5" => value >= 0 && value <= 1000,          // Partículas: 0 a 1000 µg/m³
-            "PM10" => value >= 0 && value <= 1000,           // Partículas: 0 a 1000 µg/m³
-            "RUIDO" => value >= 0 && value <= 150,           // Ruído: 0 a 150 dB
-            "AR" => value >= 0 && value <= 500,              // Qualidade do ar: índice 0-500
-            "LUMINOSIDADE" => value >= 0 && value <= 150000, // Luminosidade: lux
-            _ => true // Outros tipos não têm validação específica
-        };
-    }
-
-    private static bool StoreDataToFile(StoreMessage message)
-    {
-        try
-        {
-            string sensorDirectory = Path.Combine(dataDirectory, message.SensorId);
-            if (!Directory.Exists(sensorDirectory))
-            {
-                Directory.CreateDirectory(sensorDirectory);
-            }
-
-            string fileName = Path.Combine(sensorDirectory, $"measurements_{message.DataType}.txt");
-
-            // Formato: timestamp:sensor_id:zona:tipo_dado:valor
-            string line = $"{message.Timestamp:O}:{message.SensorId}:{message.Zone}:{message.DataType}:{message.Value}";
-
-            fileMutex.WaitOne();
-            try
-            {
-                File.AppendAllText(fileName, line + Environment.NewLine);
-            }
-            finally
-            {
-                fileMutex.ReleaseMutex();
-            }
-
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  ❌ Erro ao escrever ficheiro: {ex.Message}");
-            return false;
-        }
-    }
-
-    private static void SendResponse(StreamWriter writer, StorageResponseMessage response)
-    {
-        string json = MessageSerializer.Serialize(response);
-        writer.WriteLine(json);
-    }
-}
+// ── DTO ─────────────────────────────────────────────────────────────────────
+public record AnalysisRequest(
+    string? SensorId, string? Zone, string DataType,
+    string? StartTime, string? EndTime, string? AnalysisType);

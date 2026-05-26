@@ -1,273 +1,265 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net.Sockets;
-using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using RabbitMQ.Client;
 using One_Health.Common.Protocol;
 using One_Health.Common.Utilities;
 
 namespace One_Health.Sensor;
 
 /// <summary>
-/// Implementação do SENSOR na Fase 2
-/// Conecta ao GATEWAY, envia medições, e recebe confirmações
+/// SENSOR (TP2): publica medições no broker RabbitMQ (Pub/Sub).
+/// Não requer ligação TCP direta ao Gateway.
 /// </summary>
 internal class SensorProgram
 {
-    private static string _sensorId = string.Empty;
-    private static string _gatewayIp = string.Empty;
-    private static int _gatewayPort = 9000;
-    private static string _configFilePath = "config/sensors.csv";
-    private static TcpClient? _client;
-    private static NetworkStream? _stream;
-    private static string? _token;
-    private static string _zone = "ZONA_CENTRO";
+    private static string   _sensorId       = string.Empty;
+    private static string   _rabbitHost     = "localhost";
+    private static string   _configFilePath = "config/sensors.csv";
+    private static string   _zone           = "ZONA_CENTRO";
+    private static string   _sensorStatus   = "ativo";
     private static string[] _supportedDataTypes = SensorDefaults.SupportedDataTypes;
-    private static bool _isConnected = false;
-    private static bool _isRegistered = false;
-    private static bool _isStreaming = false;
-    private static bool _isLowBattery = false;
-    private static CancellationTokenSource _cancellationTokenSource = new();
-    private static Random _random = new();
 
-    static void Main(string[] args)
+    private static IConnection? _connection;
+    private static IChannel?    _channel;
+    private const  string       ExchangeName = "one_health";
+
+    private static bool _isConnected = false;
+    private static CancellationTokenSource _cts = new();
+    private static readonly SemaphoreSlim _publishLock = new SemaphoreSlim(1, 1);
+
+    static async Task Main(string[] args)
     {
-        Console.WriteLine("=== ONE HEALTH SENSOR ===");
-        Console.WriteLine("Fase 2 - Implementação de SENSOR simples");
+        Console.WriteLine("=== ONE HEALTH SENSOR (TP2) ===");
+        Console.WriteLine("Comunicação via RabbitMQ Pub/Sub");
         Console.WriteLine();
 
-        if (args.Length < 2)
+        if (args.Length < 1)
         {
-            Console.WriteLine("Uso: dotnet run -- <sensor_id> <gateway_ip> [gateway_port] [config_file]");
-            Console.WriteLine("Exemplo: dotnet run -- S101 127.0.0.1 9000 config/sensors.csv");
+            Console.WriteLine("Uso: dotnet run -- <sensor_id> [rabbit_host] [config_file]");
+            Console.WriteLine("Exemplo: dotnet run -- S101 localhost config/sensors.csv");
             return;
         }
 
-        _sensorId = args[0];
-        _gatewayIp = args[1];
-        _gatewayPort = args.Length > 2 ? int.Parse(args[2]) : 9000;
-        _configFilePath = args.Length > 3 ? args[3] : "config/sensors.csv";
+        _sensorId       = args[0];
+        _rabbitHost     = args.Length > 1 ? args[1] : "localhost";
+        _configFilePath = args.Length > 2 ? args[2] : "config/sensors.csv";
 
         LoadSensorConfiguration();
 
-        Console.WriteLine($"Sensor ID: {_sensorId}");
-        Console.WriteLine($"Gateway: {_gatewayIp}:{_gatewayPort}");
-        Console.WriteLine($"Config: {_configFilePath}");
-        Console.WriteLine($"Zona: {_zone}");
-        Console.WriteLine($"Tipos suportados: {string.Join(",", _supportedDataTypes)}");
+        Console.WriteLine($"Sensor ID:         {_sensorId}");
+        Console.WriteLine($"Estado:            {_sensorStatus}");
+        Console.WriteLine($"RabbitMQ:          {_rabbitHost}");
+        Console.WriteLine($"Zona:              {_zone}");
+        Console.WriteLine($"Tipos suportados:  {string.Join(", ", _supportedDataTypes)}");
         Console.WriteLine();
+
+        if (_sensorStatus != "ativo")
+        {
+            string msg = _sensorStatus == "manutencao"
+                ? $"Sensor {_sensorId} em MANUTENÇÃO — envio de dados suspenso temporariamente."
+                : $"Sensor {_sensorId} DESATIVADO — não é possível enviar dados.";
+            Console.WriteLine(msg);
+            Console.WriteLine("\nPressione ENTER para terminar.");
+            Console.ReadLine();
+            return;
+        }
 
         try
         {
-            ConnectToGateway();
+            await ConnectToRabbitMQAsync();
 
             if (!_isConnected)
             {
-                Console.WriteLine("Falha ao conectar ao Gateway.");
+                Console.WriteLine("Falha ao conectar ao RabbitMQ.");
                 return;
             }
 
-            RegisterWithGateway();
+            int intervalMs = args.Length > 3 ? int.Parse(args[3]) : 60000;
+            Console.WriteLine($"Auto-envio em paralelo a cada {intervalMs / 1000}s ({_supportedDataTypes.Length} threads, 1 por tipo de dado)");
+            Console.WriteLine();
 
-            if (!_isRegistered)
-            {
-                Console.WriteLine("Falha ao registar no Gateway.");
-                return;
-            }
+            // Uma thread por tipo de dado + heartbeat — todas concorrem no _publishLock
+            Task heartbeatTask = Task.Run(() => SendHeartbeatPeriodicallyAsync(_cts.Token));
+            Task[] dataTasks   = _supportedDataTypes
+                .Where(t => t != "VIDEO")
+                .Select(dataType => Task.Run(() => SendDataTypeLoopAsync(dataType, _cts.Token, intervalMs)))
+                .ToArray();
 
-            // Inicia thread de heartbeat automático
-            Task heartbeatTask = Task.Run(() => SendHeartbeatPeriodically(_cancellationTokenSource.Token));
+            await RunMenuAsync();
 
-            // Menu interativo
-            RunMenu();
-
-            // Encerra heartbeat
-            _cancellationTokenSource.Cancel();
-            Task.WaitAll(heartbeatTask);
-
-            // Desconecta
-            SendDisconnectMessage();
-            _stream?.Close();
-            _client?.Close();
-
-            Console.WriteLine("Sensor desconectado.");
+            _cts.Cancel();
+            await Task.WhenAll([heartbeatTask, ..dataTasks]);
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Erro: {ex.Message}");
         }
+        finally
+        {
+            _channel?.Dispose();
+            _connection?.Dispose();
+            Console.WriteLine("Sensor desconectado.");
+        }
     }
 
-    static void ConnectToGateway()
+    // ── RabbitMQ ─────────────────────────────────────────────────────────────
+
+    static async Task ConnectToRabbitMQAsync()
     {
         try
         {
-            Console.WriteLine($"Conectando ao Gateway em {_gatewayIp}:{_gatewayPort}...");
-            _client = new TcpClient();
-            _client.Connect(_gatewayIp, _gatewayPort);
-            _stream = _client.GetStream();
+            Console.WriteLine($"A conectar ao RabbitMQ em {_rabbitHost}...");
+            var factory = new ConnectionFactory { HostName = _rabbitHost };
+            _connection = await factory.CreateConnectionAsync();
+            _channel    = await _connection.CreateChannelAsync();
+
+            await _channel.ExchangeDeclareAsync(ExchangeName, ExchangeType.Topic, durable: true);
+
             _isConnected = true;
-            Console.WriteLine("Conectado ao Gateway!");
-
-            // Envia CONNECT
-            var connectMsg = new ConnectMessage { SensorId = _sensorId };
-            SendMessage(connectMsg);
-
-            // Recebe resposta
-            ResponseMessage? response = ReceiveMessage<ResponseMessage>();
-            if (response?.Status == "OK")
-            {
-                _token = response.Message;
-                Console.WriteLine($"Token recebido: {_token}");
-            }
-            else
-            {
-                _isConnected = false;
-                Console.WriteLine($"Gateway rejeitou conexão: {response?.Message}");
-            }
+            Console.WriteLine("Conectado ao RabbitMQ!");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Erro na conexão: {ex.Message}");
+            Console.WriteLine($"Erro ao conectar ao RabbitMQ: {ex.Message}");
             _isConnected = false;
         }
     }
 
-    static void RegisterWithGateway()
+    static async Task PublishAsync<T>(T message, string routingKey) where T : Message
     {
+        if (_channel == null)
+            throw new InvalidOperationException("Canal RabbitMQ não disponível");
+
+        await _publishLock.WaitAsync();
         try
         {
-            Console.WriteLine("Registando com o Gateway...");
-            var registerMsg = new RegisterMessage
-            {
-                SensorId = _sensorId,
-                Token = _token ?? string.Empty,
-                Zone = _zone,
-                SupportedDataTypes = _supportedDataTypes.ToList()
-            };
-            SendMessage(registerMsg);
-
-            // Recebe resposta
-            ResponseMessage? response = ReceiveMessage<ResponseMessage>();
-            if (response?.Status == "OK")
-            {
-                _isRegistered = true;
-                Console.WriteLine("Registado com sucesso!");
-            }
-            else
-            {
-                Console.WriteLine($"Gateway rejeitou registo: {response?.Message}");
-            }
+            string json = MessageSerializer.Serialize(message);
+            byte[] body = Encoding.UTF8.GetBytes(json);
+            var props   = new BasicProperties { Persistent = true };
+            await _channel.BasicPublishAsync(ExchangeName, routingKey, false, props, body);
         }
-        catch (Exception ex)
+        finally
         {
-            Console.WriteLine($"Erro no registo: {ex.Message}");
+            _publishLock.Release();
         }
     }
 
-    static void RunMenu()
+    // ── Menu ─────────────────────────────────────────────────────────────────
+
+    static async Task RunMenuAsync()
     {
-        bool running = true;
-        while (running && _isConnected && _isRegistered)
+        while (_isConnected)
         {
             Console.WriteLine("\n--- MENU ---");
-            Console.WriteLine("1. Enviar medição (DATA)");
-            Console.WriteLine("2. Enviar heartbeat (HEARTBEAT)");
-            Console.WriteLine("3. Requisitar stream (STREAM_REQUEST)");
-            Console.WriteLine("5. Alternar modo bateria baixa");
-            Console.WriteLine("4. Desconectar (DISCONNECT)");
+            Console.WriteLine("1. Enviar medição manual (DATA)");
+            Console.WriteLine("2. Enviar heartbeat");
             Console.WriteLine("0. Sair");
+            Console.WriteLine("[Auto-envio a correr em background]");
             Console.Write("Opção: ");
 
             string? option = Console.ReadLine();
-
             switch (option)
             {
-                case "1":
-                    SendDataInteractive();
-                    break;
-                case "2":
-                    SendHeartbeatMessage();
-                    break;
-                case "3":
-                    RequestStreamInteractive();
-                    break;
-                case "5":
-                    ToggleLowBatteryMode();
-                    break;
-                case "4":
-                    running = false;
-                    break;
-                case "0":
-                    running = false;
-                    break;
-                default:
-                    Console.WriteLine("Opção inválida.");
-                    break;
+                case "1": await SendDataInteractiveAsync(); break;
+                case "2": await SendHeartbeatAsync();       break;
+                case "0": _isConnected = false;             break;
+                default:  Console.WriteLine("Opção inválida."); break;
             }
         }
     }
 
-    static void SendDataInteractive()
+    static async Task SendDataInteractiveAsync()
     {
-        var availableDataTypes = _supportedDataTypes;
-
         Console.WriteLine("\nTipos de dados disponíveis:");
-        for (int i = 0; i < availableDataTypes.Length; i++)
-        {
-            Console.WriteLine($"{i + 1}. {availableDataTypes[i]}");
-        }
-        Console.Write("Selecione tipo de dado (número): ");
+        for (int i = 0; i < _supportedDataTypes.Length; i++)
+            Console.WriteLine($"  {i + 1}. {_supportedDataTypes[i]}");
 
-        if (!int.TryParse(Console.ReadLine(), out int typeIndex) || typeIndex < 1 || typeIndex > availableDataTypes.Length)
+        Console.Write("Selecione tipo (número): ");
+        if (!int.TryParse(Console.ReadLine(), out int idx) || idx < 1 || idx > _supportedDataTypes.Length)
         {
             Console.WriteLine("Tipo inválido.");
             return;
         }
 
-        string dataType = availableDataTypes[typeIndex - 1];
+        string dataType = _supportedDataTypes[idx - 1];
 
-        Console.Write("Valor (enter para gerar aleatório): ");
+        Console.Write("Valor (ENTER = aleatório): ");
         string? valueInput = Console.ReadLine();
 
         double value;
         if (string.IsNullOrWhiteSpace(valueInput))
         {
             value = SensorDefaults.GetRandomValue(dataType);
-            Console.WriteLine($"Valor gerado aleatoriamente: {value}");
+            Console.WriteLine($"Valor gerado: {value}");
         }
-        else
+        else if (!double.TryParse(valueInput, System.Globalization.NumberStyles.Any,
+                                  System.Globalization.CultureInfo.InvariantCulture, out value))
         {
-            if (!double.TryParse(valueInput, out value))
+            Console.WriteLine("Valor inválido.");
+            return;
+        }
+
+        var dataMsg = new DataMessage { SensorId = _sensorId, DataType = dataType, Value = value };
+
+        // Routing key: sensor.<ZONE>.<DATA_TYPE>
+        string routingKey = $"sensor.{_zone}.{dataType}";
+        await PublishAsync(dataMsg, routingKey);
+
+        Console.WriteLine($"Publicado: {routingKey} = {value}");
+    }
+
+    static async Task SendHeartbeatAsync()
+    {
+        var hbMsg = new HeartbeatMessage { SensorId = _sensorId };
+        await PublishAsync(hbMsg, $"heartbeat.{_sensorId}");
+        Console.WriteLine("Heartbeat publicado.");
+    }
+
+    static async Task SendHeartbeatPeriodicallyAsync(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested && _isConnected)
             {
-                Console.WriteLine("Valor inválido.");
-                return;
+                await Task.Delay(120000, token);
+                if (_isConnected)
+                    await SendHeartbeatAsync();
             }
         }
-
-        var dataMsg = new DataMessage
+        catch (TaskCanceledException) { }
+        catch (Exception ex)
         {
-            SensorId = _sensorId,
-            DataType = dataType,
-            Value = value
-        };
-        SendMessage(dataMsg);
-
-        // Recebe resposta do Gateway
-        ResponseMessage? response = ReceiveMessage<ResponseMessage>();
-        if (response?.Status == "OK")
-        {
-            Console.WriteLine($"Medição enviada com sucesso!");
-        }
-        else
-        {
-            Console.WriteLine($"Erro ao enviar medição: {response?.Message}");
+            Console.WriteLine($"Heartbeat thread: {ex.Message}");
         }
     }
+
+    // Uma thread dedicada por tipo de dado — todas concorrem simultaneamente no _publishLock
+    static async Task SendDataTypeLoopAsync(string dataType, CancellationToken token, int intervalMs = 5000)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested && _isConnected)
+            {
+                await Task.Delay(intervalMs, token);
+                if (!_isConnected) break;
+
+                double value      = SensorDefaults.GetRandomValue(dataType);
+                var dataMsg       = new DataMessage { SensorId = _sensorId, DataType = dataType, Value = value };
+                string routingKey = $"sensor.{_zone}.{dataType}";
+
+                await PublishAsync(dataMsg, routingKey);
+                Console.WriteLine($"[{dataType,-12} | Thread {Environment.CurrentManagedThreadId,2}] {routingKey} = {value:F2}");
+            }
+        }
+        catch (TaskCanceledException) { }
+        catch (Exception ex) { Console.WriteLine($"[{dataType}] Erro: {ex.Message}"); }
+    }
+
+    // ── Config ────────────────────────────────────────────────────────────────
 
     static void LoadSensorConfiguration()
     {
@@ -275,256 +267,37 @@ internal class SensorProgram
         {
             if (!File.Exists(_configFilePath))
             {
-                Console.WriteLine($"⚠️  Ficheiro de configuração não encontrado: {_configFilePath}");
+                Console.WriteLine($"Ficheiro de configuração não encontrado: {_configFilePath}");
                 return;
             }
 
             foreach (var line in File.ReadLines(_configFilePath))
             {
-                if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#"))
-                    continue;
-
-                if (line.StartsWith("sensor_id", StringComparison.OrdinalIgnoreCase))
+                if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#") ||
+                    line.StartsWith("sensor_id", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 var parts = line.Split(':', 5);
-                if (parts.Length < 5)
-                    continue;
-
+                if (parts.Length < 5) continue;
                 if (!string.Equals(parts[0].Trim(), _sensorId, StringComparison.OrdinalIgnoreCase))
                     continue;
 
+                _sensorStatus = parts[1].Trim();
                 _zone = parts[2].Trim();
 
                 string typesPart = parts[3].Trim().TrimStart('[').TrimEnd(']');
-                var types = typesPart
-                    .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                    .Where(t => !string.IsNullOrWhiteSpace(t))
-                    .ToArray();
-
-                if (types.Length > 0)
-                {
-                    _supportedDataTypes = types;
-                }
-
+                var types = typesPart.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                                     .Where(t => !string.IsNullOrWhiteSpace(t))
+                                     .ToArray();
+                if (types.Length > 0) _supportedDataTypes = types;
                 return;
             }
 
-            Console.WriteLine($"⚠️  Sensor {_sensorId} não encontrado em {_configFilePath}. Usando defaults.");
+            Console.WriteLine($"Sensor {_sensorId} não encontrado em {_configFilePath}. A usar defaults.");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"⚠️  Erro a ler configuração: {ex.Message}");
-        }
-    }
-
-    static void SendHeartbeatMessage()
-    {
-        var heartbeatMsg = new HeartbeatMessage
-        {
-            SensorId = _sensorId,
-            IntervalSeconds = GetHeartbeatIntervalSeconds(),
-            IsStreaming = _isStreaming,
-            IsLowBattery = _isLowBattery
-        };
-        SendMessage(heartbeatMsg);
-        Console.WriteLine($"Heartbeat enviado (intervalo={heartbeatMsg.IntervalSeconds}s, streaming={heartbeatMsg.IsStreaming}, bateria_baixa={heartbeatMsg.IsLowBattery}).");
-    }
-
-    static void RequestStreamInteractive()
-    {
-        Console.Write("Endpoint do stream (ex: 192.168.1.100:5000): ");
-        string? endpoint = Console.ReadLine();
-
-        if (string.IsNullOrWhiteSpace(endpoint))
-        {
-            Console.WriteLine("Endpoint inválido.");
-            return;
-        }
-
-        var streamMsg = new StreamRequestMessage
-        {
-            SensorId = _sensorId,
-            StreamType = "VIDEO",
-            StreamEndpoint = endpoint
-        };
-        SendMessage(streamMsg);
-
-        // Recebe resposta
-        ResponseMessage? response = ReceiveMessage<ResponseMessage>();
-        Console.WriteLine($"Resposta: {response?.Message}");
-
-        if (response?.Status == "OK")
-        {
-            _isStreaming = true;
-            SimulateVideoStream();
-            _isStreaming = false;
-        }
-    }
-
-    static void SimulateVideoStream()
-    {
-        string streamId = $"{_sensorId}_{DateTime.Now:yyyyMMddHHmmss}";
-
-        var startMsg = new StreamStartMessage
-        {
-            SensorId = _sensorId,
-            StreamId = streamId,
-            StreamType = "VIDEO"
-        };
-
-        SendMessage(startMsg);
-        ResponseMessage? startResponse = ReceiveMessage<ResponseMessage>();
-        if (startResponse?.Status != "OK")
-        {
-            Console.WriteLine($"Falha ao iniciar stream: {startResponse?.Message}");
-            return;
-        }
-
-        Console.WriteLine($"Stream iniciada: {streamId}");
-
-        const int frameCount = 5;
-        for (int i = 1; i <= frameCount; i++)
-        {
-            byte[] fakeFrame = RandomNumberGenerator.GetBytes(256);
-            string payload = Convert.ToBase64String(fakeFrame);
-
-            var frameMsg = new StreamFrameMessage
-            {
-                SensorId = _sensorId,
-                StreamId = streamId,
-                Sequence = i,
-                PayloadBase64 = payload
-            };
-
-            SendMessage(frameMsg);
-            ResponseMessage? frameResponse = ReceiveMessage<ResponseMessage>();
-            if (frameResponse?.Status != "OK")
-            {
-                Console.WriteLine($"Falha no frame {i}: {frameResponse?.Message}");
-                break;
-            }
-
-            Console.WriteLine($"Frame {i}/{frameCount} enviado");
-            Thread.Sleep(200);
-        }
-
-        var endMsg = new StreamEndMessage
-        {
-            SensorId = _sensorId,
-            StreamId = streamId,
-            Reason = "Fim da simulação"
-        };
-
-        SendMessage(endMsg);
-        ResponseMessage? endResponse = ReceiveMessage<ResponseMessage>();
-        Console.WriteLine($"Fim da stream: {endResponse?.Message}");
-    }
-
-    static void SendDisconnectMessage()
-    {
-        try
-        {
-            var disconnectMsg = new DisconnectMessage { SensorId = _sensorId };
-            SendMessage(disconnectMsg);
-
-            ResponseMessage? response = ReceiveMessage<ResponseMessage>();
-            if (response?.Status == "OK")
-            {
-                Console.WriteLine("Desconexão confirmada pelo Gateway.");
-            }
-            else
-            {
-                Console.WriteLine($"Falha ao desconectar: {response?.Message}");
-            }
-
-            _isRegistered = false;
-            _isConnected = false;
-        }
-        catch
-        {
-            // Ignora erros ao desconectar
-        }
-    }
-
-    static void SendHeartbeatPeriodically(CancellationToken cancellationToken)
-    {
-        try
-        {
-            while (!cancellationToken.IsCancellationRequested && _isConnected)
-            {
-                int interval = GetHeartbeatIntervalSeconds();
-
-                if (cancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(interval)))
-                {
-                    break;
-                }
-
-                if (_isConnected && _isRegistered)
-                {
-                    SendHeartbeatMessage();
-                }
-            }
-        }
-        catch
-        {
-            // Ignora exceções na thread de heartbeat
-        }
-    }
-
-    static int GetHeartbeatIntervalSeconds()
-    {
-        if (_isLowBattery)
-        {
-            return 300;
-        }
-
-        if (_isStreaming)
-        {
-            return 20;
-        }
-
-        return 120;
-    }
-
-    static void ToggleLowBatteryMode()
-    {
-        _isLowBattery = !_isLowBattery;
-        Console.WriteLine(_isLowBattery
-            ? "Modo bateria baixa ATIVADO (heartbeat ~300s)."
-            : "Modo bateria baixa DESATIVADO.");
-    }
-
-    static void SendMessage<T>(T message) where T : Message
-    {
-        if (_stream == null)
-            throw new InvalidOperationException("Não ligado ao Gateway");
-
-        string json = MessageSerializer.Serialize(message);
-        byte[] data = Encoding.UTF8.GetBytes(json + "\n");
-        _stream.Write(data, 0, data.Length);
-        _stream.Flush();
-    }
-
-    static T? ReceiveMessage<T>() where T : Message
-    {
-        if (_stream == null)
-            throw new InvalidOperationException("Não ligado ao Gateway");
-
-        using (var reader = new StreamReader(_stream, Encoding.UTF8, false, 1024, true))
-        {
-            string? line = reader.ReadLine();
-            if (line == null)
-                return null;
-
-            // For ResponseMessage, use MessageFactory
-            if (typeof(T) == typeof(ResponseMessage))
-            {
-                var msg = MessageFactory.DeserializeMessage(line);
-                return msg as T;
-            }
-
-            return MessageSerializer.Deserialize<T>(line);
+            Console.WriteLine($"Erro a ler configuração: {ex.Message}");
         }
     }
 }

@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package preprocessing;
+option csharp_namespace = "PreProcessing";
+
+service PreProcessingService {
+  rpc PreProcess (RawSensorData) returns (ProcessedSensorData);
+}
+
+message RawSensorData {
+  string sensor_id = 1;
+  string zone      = 2;
+  string data_type = 3;
+  double value     = 4;
+  string timestamp = 5;
+}
+
+message ProcessedSensorData {
+  string sensor_id        = 1;
+  string zone             = 2;
+  string data_type        = 3;
+  double normalized_value = 4;
+  string unit             = 5;
+  string timestamp        = 6;
+  bool   is_valid         = 7;
+  string error_message    = 8;
+}

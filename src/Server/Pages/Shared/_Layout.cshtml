@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@ViewData["Title"] — One Health</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --brand:       #16a34a;
+            --brand-dark:  #15803d;
+            --brand-deeper:#0f6030;
+            --brand-light: #f0fdf4;
+            --brand-muted: #bbf7d0;
+            --text:        #111827;
+            --text-muted:  #6b7280;
+            --border:      #e5e7eb;
+            --bg:          #f9fafb;
+            --white:       #ffffff;
+            --shadow-sm:   0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.05);
+            --shadow:      0 4px 12px rgba(0,0,0,.08);
+            --radius:      8px;
+        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 13px; }
+
+        /* ── NAV ── */
+        nav {
+            background: var(--brand-deeper);
+            padding: 0 24px;
+            display: flex; align-items: center;
+            height: 48px; gap: 2px;
+            box-shadow: 0 2px 8px rgba(0,0,0,.18);
+            position: sticky; top: 0; z-index: 100;
+        }
+        .nav-brand {
+            display: flex; align-items: center; gap: 8px;
+            font-size: .95rem; font-weight: 700; color: #fff;
+            margin-right: 20px; text-decoration: none; letter-spacing: -.3px;
+        }
+        .nav-brand svg { width: 20px; height: 20px; }
+        nav a {
+            color: #a7f3d0; text-decoration: none;
+            font-size: .78rem; font-weight: 500;
+            padding: 4px 11px; border-radius: 5px;
+            transition: background .15s, color .15s;
+        }
+        nav a:hover  { background: rgba(255,255,255,.1); color: #fff; }
+        nav a.active { background: rgba(255,255,255,.15); color: #fff; }
+        .nav-spacer  { flex: 1; }
+        .nav-tag {
+            font-size: .65rem; color: #6ee7b7;
+            border: 1px solid rgba(110,231,183,.35);
+            padding: 2px 8px; border-radius: 20px; font-weight: 500;
+        }
+
+        /* ── MAIN ── */
+        main { max-width: 1280px; margin: 0 auto; padding: 22px 20px 40px; }
+
+        /* ── TYPOGRAPHY ── */
+        h1 { font-size: 1.15rem; font-weight: 700; color: var(--text); margin-bottom: 3px; }
+        h2 { font-size: .88rem; font-weight: 600; color: var(--text); margin: 18px 0 8px; }
+        .page-subtitle { color: var(--text-muted); font-size: .75rem; margin-bottom: 18px; }
+
+        /* ── CARDS ── */
+        .card {
+            background: var(--white); border-radius: var(--radius);
+            padding: 14px 16px; box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border); margin-bottom: 14px;
+        }
+
+        /* ── STAT CARDS ── */
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
+        .stat-card {
+            background: var(--white); border-radius: var(--radius);
+            padding: 13px 16px; box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border);
+            display: flex; flex-direction: column; gap: 4px;
+        }
+        .stat-label { font-size: .68rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+        .stat-value { font-size: 1.55rem; font-weight: 700; color: var(--brand); line-height: 1; }
+        .stat-icon  { font-size: 1rem; margin-bottom: 2px; }
+
+        /* ── TABLES ── */
+        .table-wrap { background: var(--white); border-radius: var(--radius); border: 1px solid var(--border); overflow: hidden; box-shadow: var(--shadow-sm); }
+        table { width: 100%; border-collapse: collapse; }
+        thead th {
+            background: #f8fafc; color: var(--text-muted);
+            padding: 7px 11px; text-align: left;
+            font-size: .67rem; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .06em;
+            border-bottom: 1px solid var(--border);
+        }
+        td { padding: 7px 11px; border-bottom: 1px solid #f1f5f9; font-size: .78rem; color: var(--text); }
+        tr:last-child td { border-bottom: none; }
+        tbody tr:hover td { background: #f8fffe; }
+
+        /* ── BADGES ── */
+        .badge { display: inline-block; padding: 2px 7px; border-radius: 20px; font-size: .65rem; font-weight: 600; }
+        .badge-ativo      { background: #dcfce7; color: #15803d; }
+        .badge-manutencao { background: #fef9c3; color: #a16207; }
+        .badge-desativado { background: #fee2e2; color: #b91c1c; }
+        .badge-LOW        { background: #dcfce7; color: #15803d; }
+        .badge-MEDIUM     { background: #fef9c3; color: #a16207; }
+        .badge-HIGH       { background: #ffedd5; color: #c2410c; }
+        .badge-CRITICAL   { background: #fee2e2; color: #b91c1c; }
+        .badge-type       { background: #eff6ff; color: #1d4ed8; }
+        .badge-zone       { background: #f5f3ff; color: #6d28d9; }
+
+        /* ── FORMS ── */
+        .filter-form {
+            background: var(--white); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 12px 14px;
+            display: flex; gap: 10px; flex-wrap: wrap;
+            align-items: flex-end; margin-bottom: 14px;
+            box-shadow: var(--shadow-sm);
+        }
+        .form-group { display: flex; flex-direction: column; gap: 3px; }
+        .form-group label { font-size: .65rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+        .form-group input, .form-group select {
+            padding: 5px 9px; border: 1px solid var(--border);
+            border-radius: 5px; font-size: .78rem; color: var(--text);
+            background: var(--white); outline: none;
+            transition: border-color .15s, box-shadow .15s;
+            min-width: 130px;
+        }
+        .form-group input:focus, .form-group select:focus {
+            border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,163,74,.1);
+        }
+        .btn {
+            display: inline-flex; align-items: center; gap: 5px;
+            background: var(--brand); color: #fff; border: none;
+            border-radius: 5px; padding: 6px 14px;
+            cursor: pointer; font-size: .78rem; font-weight: 600;
+            transition: background .15s; text-decoration: none;
+            white-space: nowrap;
+        }
+        .btn:hover { background: var(--brand-dark); }
+        .btn-outline { background: transparent; color: var(--brand); border: 1px solid var(--brand); }
+        .btn-outline:hover { background: var(--brand-light); }
+
+        /* ── PAGINATION ── */
+        .pagination { display: flex; align-items: center; gap: 3px; margin-top: 14px; flex-wrap: wrap; }
+        .pagination a, .pagination span {
+            display: inline-flex; align-items: center; justify-content: center;
+            min-width: 28px; height: 28px; padding: 0 7px;
+            border-radius: 5px; border: 1px solid var(--border);
+            text-decoration: none; font-size: .75rem; color: var(--text);
+            background: var(--white); transition: all .15s;
+        }
+        .pagination a:hover  { background: var(--brand-light); border-color: var(--brand); color: var(--brand); }
+        .pagination .active  { background: var(--brand); color: #fff; border-color: var(--brand); font-weight: 600; }
+        .pagination .disabled { color: #d1d5db; background: #f9fafb; pointer-events: none; }
+
+        /* ── MISC ── */
+        .empty  { color: var(--text-muted); text-align: center; padding: 30px; font-size: .78rem; }
+        .page-info { color: var(--text-muted); font-size: .75rem; margin-bottom: 8px; }
+        .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+        .count-zero { color: #d1d5db; }
+
+        /* ── ANALYSIS RESULT ── */
+        .analysis-result-card {
+            border-left: 4px solid var(--brand); background: var(--brand-light);
+            border-radius: 0 var(--radius) var(--radius) 0; padding: 12px 16px;
+        }
+        .analysis-result-card .metrics { display: flex; gap: 16px; margin-top: 8px; flex-wrap: wrap; }
+        .metric { text-align: center; }
+        .metric-val { font-size: .95rem; font-weight: 700; color: var(--brand-dark); }
+        .metric-lbl { font-size: .63rem; color: var(--text-muted); text-transform: uppercase; }
+    </style>
+</head>
+<body>
+<nav>
+    <a class="nav-brand" asp-page="/Index">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#6ee7b7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+        </svg>
+        One Health
+    </a>
+    <a asp-page="/Index"        class="@(ViewContext.RouteData.Values["page"]?.ToString() == "/Index"        ? "active" : "")">Dashboard</a>
+    <a asp-page="/Measurements" class="@(ViewContext.RouteData.Values["page"]?.ToString() == "/Measurements" ? "active" : "")">Medições</a>
+    <a asp-page="/Analysis"     class="@(ViewContext.RouteData.Values["page"]?.ToString() == "/Analysis"     ? "active" : "")">Análise</a>
+    <a asp-page="/Sensors"      class="@(ViewContext.RouteData.Values["page"]?.ToString() == "/Sensors"      ? "active" : "")">Sensores</a>
+    <span class="nav-spacer"></span>
+    <span class="nav-tag">Vila Real · PT</span>
+</nav>
+<main>
+    @RenderBody()
+</main>
+</body>
+</html>

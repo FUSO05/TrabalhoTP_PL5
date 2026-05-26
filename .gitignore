@@ -11,5 +11,12 @@ obj/
 *.swo
 *~
 .env
-data/measurements_*.txt
-data/sensor_*.log
+data/
+src/Server/data/
+*.db
+*.db-shm
+*.db-wal
+.claudeignore
+__pycache__/
+*.pyc
+*.pyo

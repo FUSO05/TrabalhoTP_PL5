@@ -1,0 +1,159 @@
+@page
+@model AnalysisPageModel
+@{ ViewData["Title"] = "Análise"; }
+
+<h1>Análise e Previsão</h1>
+<p class="page-subtitle">Análise estatística e deteção de padrões via Serviço Python gRPC</p>
+
+<div class="card">
+    <h2 style="margin-top:0">Nova Análise</h2>
+    <div class="filter-form" style="margin-bottom:0;border:none;padding:0;box-shadow:none;background:transparent">
+        <div class="form-group">
+            <label>Sensor</label>
+            <select id="fSensor" onchange="onSensorChange()">
+                <option value="">(todos os sensores)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Tipo de dado</label>
+            <select id="fType"></select>
+        </div>
+        <div class="form-group">
+            <label>Tipo de análise</label>
+            <select id="fAnalysis">
+                <option value="STATISTICS">Estatísticas</option>
+                <option value="POLLUTION_PATTERN">Padrões de Poluição</option>
+                <option value="HEALTH_RISK">Risco para Saúde</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>De</label>
+            <input type="datetime-local" id="fFrom" />
+        </div>
+        <div class="form-group">
+            <label>Até</label>
+            <input type="datetime-local" id="fTo" />
+        </div>
+        <button type="button" class="btn" onclick="requestAnalysis()">🔬 Analisar</button>
+    </div>
+    <div id="analysisResult" style="margin-top:16px"></div>
+</div>
+
+<div class="section-header">
+    <h2 style="margin:0">Resultados Anteriores</h2>
+    <span style="color:var(--text-muted);font-size:.85rem">@Model.Results.Count resultado(s)</span>
+</div>
+
+@if (Model.Results.Count == 0)
+{
+    <div class="card empty">Nenhuma análise realizada ainda.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Tipo</th>
+                    <th>Sensor</th>
+                    <th>Dado</th>
+                    <th>Média</th>
+                    <th>Desvio</th>
+                    <th>Mín</th>
+                    <th>Máx</th>
+                    <th>Risco</th>
+                    <th>Resumo</th>
+                    <th>Data</th>
+                </tr>
+            </thead>
+            <tbody>
+            @foreach (var a in Model.Results)
+            {
+                <tr>
+                    <td><span class="badge badge-type">@a.AnalysisType</span></td>
+                    <td><strong>@(a.SensorId ?? "—")</strong></td>
+                    <td><span class="badge badge-zone">@a.DataType</span></td>
+                    <td>@a.Mean.ToString("F2")</td>
+                    <td>@a.StdDev.ToString("F2")</td>
+                    <td>@a.MinValue.ToString("F2")</td>
+                    <td>@a.MaxValue.ToString("F2")</td>
+                    <td><span class="badge badge-@a.RiskLevel">@a.RiskLevel</span></td>
+                    <td style="max-width:260px;word-break:break-word;font-size:.82rem;color:var(--text-muted)">@a.Summary</td>
+                    <td style="color:var(--text-muted);font-size:.8rem;white-space:nowrap">@a.CreatedAt</td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+}
+
+<script>
+const SENSORS = @Html.Raw(Model.SensorConfigJson);
+
+function allTypes() { return [...new Set(SENSORS.flatMap(s => s.dataTypes))].sort(); }
+
+function populateTypes(types) {
+    const sel = document.getElementById('fType');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    types.forEach(t => {
+        const o = document.createElement('option');
+        o.value = t; o.textContent = t;
+        sel.appendChild(o);
+    });
+    if (types.includes(prev)) sel.value = prev;
+}
+
+function onSensorChange() {
+    const sid = document.getElementById('fSensor').value;
+    const s   = SENSORS.find(s => s.sensorId === sid);
+    populateTypes(s ? s.dataTypes : allTypes());
+}
+
+const ddSensor = document.getElementById('fSensor');
+SENSORS.forEach(s => {
+    const o = document.createElement('option');
+    o.value = s.sensorId;
+    o.textContent = `${s.sensorId} — ${s.zone}`;
+    ddSensor.appendChild(o);
+});
+populateTypes(allTypes());
+
+async function requestAnalysis() {
+    const body = {
+        sensorId:     document.getElementById('fSensor').value || null,
+        zone:         null,
+        dataType:     document.getElementById('fType').value,
+        startTime:    document.getElementById('fFrom').value || null,
+        endTime:      document.getElementById('fTo').value || null,
+        analysisType: document.getElementById('fAnalysis').value
+    };
+    const div = document.getElementById('analysisResult');
+    div.innerHTML = '<em style="color:var(--text-muted)">⏳ A processar análise...</em>';
+    try {
+        const res  = await fetch('/api/analysis', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+        const data = await res.json();
+        if (!res.ok) {
+            div.innerHTML = `<div class="card" style="border-left:4px solid #ef4444;background:#fef2f2;padding:14px 18px"><strong style="color:#b91c1c">Erro:</strong> ${data.error || JSON.stringify(data)}</div>`;
+        } else {
+            div.innerHTML = `
+                <div class="analysis-result-card">
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                        <strong>${data.analysisType}</strong>
+                        <span class="badge badge-${data.riskLevel}">${data.riskLevel ?? '—'}</span>
+                    </div>
+                    <p style="color:var(--text-muted);font-size:.875rem;margin-bottom:10px">${data.summary ?? ''}</p>
+                    <div class="metrics">
+                        <div class="metric"><div class="metric-val">${data.mean?.toFixed(2) ?? '—'}</div><div class="metric-lbl">Média</div></div>
+                        <div class="metric"><div class="metric-val">${data.stdDev?.toFixed(2) ?? '—'}</div><div class="metric-lbl">Desvio</div></div>
+                        <div class="metric"><div class="metric-val">${data.minValue?.toFixed(2) ?? '—'}</div><div class="metric-lbl">Mínimo</div></div>
+                        <div class="metric"><div class="metric-val">${data.maxValue?.toFixed(2) ?? '—'}</div><div class="metric-lbl">Máximo</div></div>
+                    </div>
+                </div>`;
+            setTimeout(() => location.reload(), 2000);
+        }
+    } catch(e) {
+        div.innerHTML = `<div class="card" style="border-left:4px solid #ef4444;background:#fef2f2;padding:14px 18px"><strong style="color:#b91c1c">Erro de comunicação:</strong> ${e.message}</div>`;
+    }
+}
+</script>

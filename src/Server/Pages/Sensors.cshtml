@@ -1,0 +1,60 @@
+@page
+@model SensorsPageModel
+@{ ViewData["Title"] = "Sensores"; }
+
+<h1>Sensores</h1>
+<p class="page-subtitle">Estado e configuração de todos os sensores registados</p>
+
+@if (Model.AllSensors.Count == 0)
+{
+    <div class="card empty">Ficheiro de configuração não encontrado ou sem sensores.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Sensor ID</th>
+                    <th>Estado</th>
+                    <th>Zona</th>
+                    <th>Tipos de Dados</th>
+                    <th style="text-align:right">Medições</th>
+                </tr>
+            </thead>
+            <tbody>
+            @foreach (var sensor in Model.AllSensors)
+            {
+                var hasStat = Model.DbStats.TryGetValue(sensor.SensorId, out var stat);
+                int count   = hasStat ? stat!.Count : 0;
+
+                string badgeClass = sensor.Status switch {
+                    "ativo"      => "badge-ativo",
+                    "manutencao" => "badge-manutencao",
+                    _            => "badge-desativado"
+                };
+                string label = sensor.Status switch {
+                    "ativo"      => "Ativo",
+                    "manutencao" => "Manutenção",
+                    _            => "Desativado"
+                };
+
+                <tr>
+                    <td><strong>@sensor.SensorId</strong></td>
+                    <td><span class="badge @badgeClass">@label</span></td>
+                    <td><span class="badge badge-zone">@sensor.Zone</span></td>
+                    <td>
+                        @foreach (var t in sensor.DataTypes)
+                        {
+                            <span class="badge badge-type" style="margin-right:4px">@t</span>
+                        }
+                    </td>
+                    <td style="text-align:right;font-weight:600;color:@(count == 0 ? "var(--text-muted)" : "var(--brand)")">
+                        @count
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+}
