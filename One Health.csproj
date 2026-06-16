@@ -10,6 +10,10 @@
 
   <ItemGroup>
     <None Include="OneHealth.sln" />
+    <Compile Remove="src\**\*.cs" />
+    <None Remove="src\**\*.cs" />
+    <EmbeddedResource Remove="src\**" />
+    <Content Remove="src\**" />
   </ItemGroup>
 
 </Project>
